@@ -183,13 +183,12 @@ static loff_t pmfs_llseek(struct file *file, loff_t offset, int origin)
  * TODO: Check if we can avoid calling pmfs_flush_buffer() for fsync. We use
  * movnti to write data to files, so we may want to avoid doing unnecessary
  * pmfs_flush_buffer() on fsync() */
-static int pmfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+int pmfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	/* Sync from start to end[inclusive] */
 	struct address_space *mapping = file->f_mapping;
 	struct inode *inode = mapping->host;
 	loff_t isize;
-	int error;
 
 	/* if the file is not mmap'ed, there is no need to do clflushes */
 	if (mapping_mapped(mapping) == 0)
@@ -212,10 +211,11 @@ static int pmfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	start = start & CACHELINE_MASK;
 	end = CACHELINE_ALIGN(end);
 	do {
+		sector_t block = 0;
 		void *xip_mem;
 		pgoff_t pgoff;
 		loff_t offset;
-		unsigned long xip_pfn, nr_flush_bytes;
+		unsigned long nr_flush_bytes;
 
 		pgoff = start >> PAGE_CACHE_SHIFT;
 		offset = start & ~PAGE_CACHE_MASK;
@@ -224,16 +224,17 @@ static int pmfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 		if (nr_flush_bytes > (end - start))
 			nr_flush_bytes = end - start;
 
-		error = mapping->a_ops->get_xip_mem(mapping, pgoff, 0,
-		&xip_mem, &xip_pfn);
+		block = pmfs_find_data_block(inode, (sector_t)pgoff);
 
-		if (unlikely(error)) {
+		if (block) {
+			xip_mem = pmfs_get_block(inode->i_sb, block);
+			/* flush the range */
+			pmfs_flush_buffer(xip_mem + offset, nr_flush_bytes, 0);
+		} else {
 			/* sparse files could have such holes */
 			pmfs_dbg_verbose("[%s:%d] : start(%llx), end(%llx),"
 			" pgoff(%lx)\n", __func__, __LINE__, start, end, pgoff);
-		} else {
-			/* flush the range */
-			pmfs_flush_buffer(xip_mem+offset, nr_flush_bytes, 0);
+			break;
 		}
 
 		start += nr_flush_bytes;
@@ -314,8 +315,10 @@ const struct file_operations pmfs_xip_file_operations = {
 	.llseek			= pmfs_llseek,
 	.read			= pmfs_xip_file_read,
 	.write			= pmfs_xip_file_write,
-	.aio_read		= xip_file_aio_read,
-	.aio_write		= xip_file_aio_write,
+//	.aio_read		= xip_file_aio_read,
+//	.aio_write		= xip_file_aio_write,
+	.read_iter		= generic_file_read_iter,
+	.write_iter		= generic_file_write_iter,
 	.mmap			= pmfs_xip_file_mmap,
 	.open			= generic_file_open,
 	.fsync			= pmfs_fsync,

@@ -13,8 +13,8 @@
 #ifndef __WPROTECT_H
 #define __WPROTECT_H
 
-#include <linux/pmfs_def.h>
 #include <linux/fs.h>
+#include "pmfs_def.h"
 
 /* pmfs_memunlock_super() before calling! */
 static inline void pmfs_sync_super(struct pmfs_super_block *ps)

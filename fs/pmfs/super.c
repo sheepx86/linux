@@ -34,6 +34,11 @@
 #include <linux/list.h>
 #include "pmfs.h"
 
+int measure_timing = 0;
+
+module_param(measure_timing, int, S_IRUGO);
+MODULE_PARM_DESC(measure_timing, "Timing measurement");
+
 static struct super_operations pmfs_sops;
 static const struct export_operations pmfs_export_ops;
 static struct kmem_cache *pmfs_inode_cachep;
@@ -114,6 +119,7 @@ void *pmfs_ioremap(struct super_block *sb, phys_addr_t phys_addr, ssize_t size)
 	if (!retval)
 		goto fail;
 
+#if 0
 	if (protect) {
 		if (hugeioremap)
 			retval = ioremap_hpage_cache_ro(phys_addr, size);
@@ -125,6 +131,10 @@ void *pmfs_ioremap(struct super_block *sb, phys_addr_t phys_addr, ssize_t size)
 		else
 			retval = ioremap_cache(phys_addr, size);
 	}
+#endif
+
+	//FIXME: No mpage or ro support
+	retval = ioremap_cache(phys_addr, size);
 
 fail:
 	return (void __force *)retval;
@@ -154,7 +164,7 @@ enum {
 	Opt_num_inodes, Opt_mode, Opt_uid,
 	Opt_gid, Opt_blocksize, Opt_wprotect, Opt_wprotectold,
 	Opt_err_cont, Opt_err_panic, Opt_err_ro,
-	Opt_hugemmap, Opt_nohugeioremap, Opt_dbgmask, Opt_err
+	Opt_hugemmap, Opt_nohugeioremap, Opt_dbgmask, Opt_bs, Opt_err
 };
 
 static const match_table_t tokens = {
@@ -174,6 +184,7 @@ static const match_table_t tokens = {
 	{ Opt_hugemmap,	     "hugemmap"		  },
 	{ Opt_nohugeioremap, "nohugeioremap"	  },
 	{ Opt_dbgmask,	     "dbgmask=%u"	  },
+	{ Opt_bs,	     "backing_dev=%s"	  },
 	{ Opt_err,	     NULL		  },
 };
 
@@ -1160,18 +1171,12 @@ static int __init init_pmfs_fs(void)
 	if (rc)
 		goto out2;
 
-	rc = bdi_init(&pmfs_backing_dev_info);
+	rc = register_filesystem(&pmfs_fs_type);
 	if (rc)
 		goto out3;
 
-	rc = register_filesystem(&pmfs_fs_type);
-	if (rc)
-		goto out4;
-
 	return 0;
 
-out4:
-	bdi_destroy(&pmfs_backing_dev_info);
 out3:
 	destroy_inodecache();
 out2:
@@ -1184,7 +1189,6 @@ out1:
 static void __exit exit_pmfs_fs(void)
 {
 	unregister_filesystem(&pmfs_fs_type);
-	bdi_destroy(&pmfs_backing_dev_info);
 	destroy_inodecache();
 	destroy_blocknode_cache();
 	destroy_transaction_cache();

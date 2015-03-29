@@ -18,9 +18,18 @@
 #include <linux/mount.h>
 #include "pmfs.h"
 
+#define	FS_PMFS_FSYNC	0xBCD0000E
+
+struct sync_range
+{
+	off_t	offset;
+	size_t	length;
+};
+
 long pmfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	struct inode *inode = filp->f_dentry->d_inode;
+	struct address_space *mapping = filp->f_mapping;
+	struct inode    *inode = mapping->host;
 	struct pmfs_inode *pi;
 	struct super_block *sb = inode->i_sb;
 	unsigned int flags;
@@ -119,6 +128,20 @@ flags_out:
 setversion_out:
 		mnt_drop_write_file(filp);
 		return ret;
+	}
+	case FS_PMFS_FSYNC: {
+		struct sync_range packet;
+		copy_from_user(&packet, (void *)arg, sizeof(struct sync_range));
+		pmfs_fsync(filp, packet.offset, packet.offset + packet.length, 1);
+		return 0;
+	}
+	case PMFS_PRINT_TIMING: {
+		pmfs_print_timing_stats();
+		return 0;
+	}
+	case PMFS_CLEAR_STATS: {
+		pmfs_clear_stats();
+		return 0;
 	}
 	default:
 		return -ENOTTY;

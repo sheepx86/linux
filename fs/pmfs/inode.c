@@ -25,11 +25,6 @@
 #include "pmfs.h"
 #include "xip.h"
 
-struct backing_dev_info pmfs_backing_dev_info __read_mostly = {
-	.ra_pages	= 0,                          /* No readahead */
-	.capabilities	= BDI_CAP_NO_ACCT_AND_WRITEBACK,
-};
-
 unsigned int blk_type_to_shift[PMFS_BLOCK_TYPE_MAX] = {12, 21, 30};
 uint32_t blk_type_to_size[PMFS_BLOCK_TYPE_MAX] = {0x1000, 0x200000, 0x40000000};
 
@@ -665,9 +660,12 @@ int __pmfs_alloc_blocks(pmfs_transaction_t *trans, struct super_block *sb,
 	unsigned int data_bits = blk_type_to_shift[pi->i_blk_type];
 	unsigned int blk_shift, meta_bits = META_BLK_SHIFT;
 	unsigned long blocknr, first_blocknr, last_blocknr, total_blocks;
+	timing_t alloc_time;
+
 	/* convert the 4K blocks into the actual blocks the inode is using */
 	blk_shift = data_bits - sb->s_blocksize_bits;
 
+	PMFS_START_TIMING(alloc_blocks_t, alloc_time);
 	first_blocknr = file_blocknr >> blk_shift;
 	last_blocknr = (file_blocknr + num - 1) >> blk_shift;
 
@@ -741,8 +739,10 @@ int __pmfs_alloc_blocks(pmfs_transaction_t *trans, struct super_block *sb,
 		if (errval < 0)
 			goto fail;
 	}
+	PMFS_END_TIMING(alloc_blocks_t, alloc_time);
 	return 0;
 fail:
+	PMFS_END_TIMING(alloc_blocks_t, alloc_time);
 	return errval;
 }
 
@@ -857,7 +857,6 @@ static int pmfs_read_inode(struct inode *inode, struct pmfs_inode *pi)
 
 	inode->i_blocks = le64_to_cpu(pi->i_blocks);
 	inode->i_mapping->a_ops = &pmfs_aops_xip;
-	inode->i_mapping->backing_dev_info = &pmfs_backing_dev_info;
 
 	switch (inode->i_mode & S_IFMT) {
 	case S_IFREG:
@@ -1565,6 +1564,7 @@ void pmfs_set_inode_flags(struct inode *inode, struct pmfs_inode *pi)
 		inode->i_flags |= S_DIRSYNC;
 	if (!pi->i_xattr)
 		inode_has_no_xattr(inode);
+	inode->i_flags |= S_DAX;
 }
 
 void pmfs_get_inode_flags(struct inode *inode, struct pmfs_inode *pi)
@@ -1589,16 +1589,20 @@ void pmfs_get_inode_flags(struct inode *inode, struct pmfs_inode *pi)
 }
 
 static ssize_t pmfs_direct_IO(int rw, struct kiocb *iocb,
-	const struct iovec *iov, loff_t offset, unsigned long nr_segs)
+	struct iov_iter *iter, loff_t offset)
 {
 	struct file *filp = iocb->ki_filp;
 	struct inode *inode = filp->f_mapping->host;
 	loff_t end = offset;
 	ssize_t err = -EINVAL;
 	unsigned long seg;
+	unsigned long nr_segs = iter->nr_segs;
+	const struct iovec *iv = iter->iov;
 
-	for (seg = 0; seg < nr_segs; seg++)
-		end += iov[seg].iov_len;
+	for (seg = 0; seg < nr_segs; seg++) {
+		end += iv->iov_len;
+		iv++;
+	}
 
 	if ((rw == WRITE) && end > i_size_read(inode)) {
 		/* FIXME: Do we need to check for out of bounds IO for R/W */
@@ -1606,8 +1610,8 @@ static ssize_t pmfs_direct_IO(int rw, struct kiocb *iocb,
 		return err;
 	}
 
+	iv = iter->iov;
 	for (seg = 0; seg < nr_segs; seg++) {
-		const struct iovec *iv = &iov[seg];
 		if (rw == READ)
 			err = pmfs_xip_file_read(filp, iv->iov_base,
 					iv->iov_len, &offset);
@@ -1616,6 +1620,12 @@ static ssize_t pmfs_direct_IO(int rw, struct kiocb *iocb,
 					iv->iov_len, &offset);
 		if (err <= 0)
 			goto err;
+		if (iter->count > iv->iov_len)
+			iter->count -= iv->iov_len;
+		else
+			iter->count = 0;
+		iter->nr_segs--;
+		iv++;
 	}
 	if (offset != end)
 		printk(KERN_ERR "pmfs: direct_IO: end = %lld"
@@ -1625,7 +1635,6 @@ err:
 }
 
 const struct address_space_operations pmfs_aops_xip = {
-	.get_xip_mem		= pmfs_get_xip_mem,
 	.direct_IO		= pmfs_direct_IO,
 	/*.xip_mem_protect	= pmfs_xip_mem_protect,*/
 };

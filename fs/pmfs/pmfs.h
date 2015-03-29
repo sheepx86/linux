@@ -15,13 +15,13 @@
 #ifndef __PMFS_H
 #define __PMFS_H
 
-#include <linux/pmfs_def.h>
 #include <linux/crc16.h>
 #include <linux/mutex.h>
 #include <linux/pagemap.h>
 #include <linux/rcupdate.h>
 #include <linux/types.h>
 
+#include "pmfs_def.h"
 #include "journal.h"
 
 #define PAGE_SHIFT_2M 21
@@ -102,6 +102,43 @@ extern unsigned int pmfs_dbgmask;
 
 extern unsigned int blk_type_to_shift[PMFS_BLOCK_TYPE_MAX];
 extern unsigned int blk_type_to_size[PMFS_BLOCK_TYPE_MAX];
+
+/* ======================= Timing ========================= */
+enum timing_category {
+	xip_read_t,
+	xip_write_t,
+	xip_write_fast_t,
+	internal_write_t,
+	memcpy_r_t,
+	memcpy_w_t,
+	alloc_blocks_t,
+	new_trans_t,
+	add_log_t,
+	commit_trans_t,
+	TIMING_NUM,
+};
+
+extern const char *Timingstring[TIMING_NUM];
+extern unsigned long long Timingstats[TIMING_NUM];
+extern u64 Countstats[TIMING_NUM];
+
+extern int measure_timing;
+
+typedef struct timespec timing_t;
+
+#define PMFS_START_TIMING(name, start) \
+	{if (measure_timing) getrawmonotonic(&start);}
+
+#define PMFS_END_TIMING(name, start) \
+	{if (measure_timing) { \
+		timing_t end; \
+		getrawmonotonic(&end); \
+		Timingstats[name] += \
+			(end.tv_sec - start.tv_sec) * 1000000000 + \
+			(end.tv_nsec - start.tv_nsec); \
+	} \
+	Countstats[name]++; \
+	}
 
 /* Function Prototypes */
 extern void pmfs_error_mng(struct super_block *sb, const char *fmt, ...);
@@ -587,6 +624,7 @@ extern const struct file_operations pmfs_dir_operations;
 /* file.c */
 extern const struct inode_operations pmfs_file_inode_operations;
 extern const struct file_operations pmfs_xip_file_operations;
+int pmfs_fsync(struct file *file, loff_t start, loff_t end, int datasync);
 
 /* inode.c */
 extern const struct address_space_operations pmfs_aops_xip;
@@ -600,8 +638,6 @@ extern const struct inode_operations pmfs_special_inode_operations;
 
 /* symlink.c */
 extern const struct inode_operations pmfs_symlink_inode_operations;
-
-extern struct backing_dev_info pmfs_backing_dev_info;
 
 int pmfs_check_integrity(struct super_block *sb,
 	struct pmfs_super_block *super);
@@ -624,5 +660,11 @@ int pmfs_search_dirblock(u8 *blk_base, struct inode *dir, struct qstr *child,
 			  unsigned long offset,
 			  struct pmfs_direntry **res_dir,
 			  struct pmfs_direntry **prev_dir);
+
+/* pmfs_stats.c */
+#define	PMFS_PRINT_TIMING	0xBCD00010
+#define	PMFS_CLEAR_STATS	0xBCD00011
+void pmfs_print_timing_stats(void);
+void pmfs_clear_stats(void);
 
 #endif /* __PMFS_H */

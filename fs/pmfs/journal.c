@@ -492,6 +492,7 @@ pmfs_transaction_t *pmfs_new_transaction(struct super_block *sb,
 	pmfs_transaction_t *trans;
 	uint32_t head, tail, req_size, avail_size;
 	uint64_t base;
+	timing_t log_time;
 #if 0
 	trans = pmfs_current_transaction();
 
@@ -501,6 +502,8 @@ pmfs_transaction_t *pmfs_new_transaction(struct super_block *sb,
 	}
 #endif
 	/* If it is an undo log, need one more log-entry for commit record */
+	PMFS_START_TIMING(new_trans_t, log_time);
+
 	if (!sbi->redo_log)
 		max_log_entries++;
 
@@ -568,6 +571,7 @@ again:
 
 	trans->parent = (pmfs_transaction_t *)current->journal_info;
 	current->journal_info = trans;
+	PMFS_END_TIMING(new_trans_t, log_time);
 	return trans;
 journal_full:
 	mutex_unlock(&sbi->journal_mutex);
@@ -576,6 +580,7 @@ journal_full:
 		le32_to_cpu(journal->head), le32_to_cpu(journal->tail),
 		max_log_entries);
 	pmfs_free_transaction(trans);
+	PMFS_END_TIMING(new_trans_t, log_time);
 	return ERR_PTR(-EAGAIN);
 }
 
@@ -621,9 +626,12 @@ int pmfs_add_logentry(struct super_block *sb,
 	int num_les = 0, i;
 	uint64_t le_start = size ? pmfs_get_addr_off(sbi, addr) : 0;
 	uint8_t le_size;
+	timing_t add_log_time;
 
 	if (trans == NULL)
 		return -EINVAL;
+
+	PMFS_START_TIMING(add_log_t, add_log_time);
 	le = trans->start_addr + trans->num_used;
 
 	if (size == 0) {
@@ -665,6 +673,7 @@ int pmfs_add_logentry(struct super_block *sb,
 		if (i == (num_les - 1) && (type & LE_COMMIT)) {
 			pmfs_commit_logentry(sb, trans, le);
 			pmfs_memlock_range(sb, le, sizeof(*le) * num_les);
+			PMFS_END_TIMING(add_log_t, add_log_time);
 			return 0;
 		}
 		/* put a compile time barrier so that compiler doesn't reorder
@@ -684,22 +693,27 @@ int pmfs_add_logentry(struct super_block *sb,
 		PERSISTENT_MARK();
 		PERSISTENT_BARRIER();
 	}
+	PMFS_END_TIMING(add_log_t, add_log_time);
 	return 0;
 }
 
 int pmfs_commit_transaction(struct super_block *sb,
 		pmfs_transaction_t *trans)
 {
+	timing_t commit_time;
+
 	if (trans == NULL)
 		return 0;
 	/* Add the commit log-entry */
 	pmfs_add_logentry(sb, trans, NULL, 0, LE_COMMIT);
 
+	PMFS_START_TIMING(commit_trans_t, commit_time);
 	pmfs_dbg_trans("completing transaction for id %d\n",
 		trans->transaction_id);
 
 	current->journal_info = trans->parent;
 	pmfs_free_transaction(trans);
+	PMFS_END_TIMING(commit_trans_t, commit_time);
 	return 0;
 }
 

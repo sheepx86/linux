@@ -19,6 +19,112 @@
 #include "pmfs.h"
 #include "xip.h"
 
+static ssize_t
+do_xip_mapping_read(struct address_space *mapping,
+		    struct file_ra_state *_ra,
+		    struct file *filp,
+		    char __user *buf,
+		    size_t len,
+		    loff_t *ppos)
+{
+	struct inode *inode = mapping->host;
+	pgoff_t index, end_index;
+	unsigned long offset;
+	loff_t isize, pos;
+	size_t copied = 0, error = 0;
+	timing_t memcpy_time;
+
+	pos = *ppos;
+	index = pos >> PAGE_CACHE_SHIFT;
+	offset = pos & ~PAGE_CACHE_MASK;
+
+	isize = i_size_read(inode);
+	if (!isize)
+		goto out;
+
+	end_index = (isize - 1) >> PAGE_CACHE_SHIFT;
+	do {
+		unsigned long nr, left;
+		void *xip_mem;
+		unsigned long xip_pfn;
+		int zero = 0;
+
+		/* nr is the maximum number of bytes to copy from this page */
+		nr = PAGE_CACHE_SIZE;
+		if (index >= end_index) {
+			if (index > end_index)
+				goto out;
+			nr = ((isize - 1) & ~PAGE_CACHE_MASK) + 1;
+			if (nr <= offset) {
+				goto out;
+			}
+		}
+		nr = nr - offset;
+		if (nr > len - copied)
+			nr = len - copied;
+
+		error = pmfs_get_xip_mem(mapping, index, 0,
+					&xip_mem, &xip_pfn);
+		if (unlikely(error)) {
+			if (error == -ENODATA) {
+				/* sparse */
+				zero = 1;
+			} else
+				goto out;
+		}
+
+		/* If users can be writing to this page using arbitrary
+		 * virtual addresses, take care about potential aliasing
+		 * before reading the page on the kernel side.
+		 */
+		if (mapping_writably_mapped(mapping))
+			/* address based flush */ ;
+
+		/*
+		 * Ok, we have the mem, so now we can copy it to user space...
+		 *
+		 * The actor routine returns how many bytes were actually used..
+		 * NOTE! This may not be the same as how much of a user buffer
+		 * we filled up (we may be padding etc), so we can only update
+		 * "pos" here (the actor routine has to update the user buffer
+		 * pointers and the remaining count).
+		 */
+		PMFS_START_TIMING(memcpy_r_t, memcpy_time);
+		if (!zero)
+			left = __copy_to_user(buf+copied, xip_mem+offset, nr);
+		else
+			left = __clear_user(buf + copied, nr);
+		PMFS_END_TIMING(memcpy_r_t, memcpy_time);
+
+		if (left) {
+			error = -EFAULT;
+			goto out;
+		}
+
+		copied += (nr - left);
+		offset += (nr - left);
+		index += offset >> PAGE_CACHE_SHIFT;
+		offset &= ~PAGE_CACHE_MASK;
+	} while (copied < len);
+
+out:
+	*ppos = pos + copied;
+	if (filp)
+		file_accessed(filp);
+
+	return (copied ? copied : error);
+}
+
+ssize_t
+xip_file_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos)
+{
+	if (!access_ok(VERIFY_WRITE, buf, len))
+		return -EFAULT;
+
+	return do_xip_mapping_read(filp->f_mapping, &filp->f_ra, filp,
+			    buf, len, ppos);
+}
+
 /*
  * Wrappers. We need to use the rcu read lock to avoid
  * concurrent truncate operation. No problem for write because we held
@@ -28,10 +134,13 @@ ssize_t pmfs_xip_file_read(struct file *filp, char __user *buf,
 			    size_t len, loff_t *ppos)
 {
 	ssize_t res;
+	timing_t xip_read_time;
 
-	rcu_read_lock();
+	PMFS_START_TIMING(xip_read_t, xip_read_time);
+//	rcu_read_lock();
 	res = xip_file_read(filp, buf, len, ppos);
-	rcu_read_unlock();
+//	rcu_read_unlock();
+	PMFS_END_TIMING(xip_read_t, xip_read_time);
 	return res;
 }
 
@@ -55,7 +164,9 @@ __pmfs_xip_file_write(struct address_space *mapping, const char __user *buf,
 	size_t      bytes;
 	ssize_t     written = 0;
 	struct pmfs_inode *pi;
+	timing_t memcpy_time, write_time;
 
+	PMFS_START_TIMING(internal_write_t, write_time);
 	pi = pmfs_get_inode(sb, inode->i_ino);
 	do {
 		unsigned long index;
@@ -73,10 +184,13 @@ __pmfs_xip_file_write(struct address_space *mapping, const char __user *buf,
 		status = pmfs_get_xip_mem(mapping, index, 1, &xmem, &xpfn);
 		if (status)
 			break;
+
+		PMFS_START_TIMING(memcpy_w_t, memcpy_time);
 		pmfs_xip_mem_protect(sb, xmem + offset, bytes, 1);
 		copied = bytes -
 		__copy_from_user_inatomic_nocache(xmem + offset, buf, bytes);
 		pmfs_xip_mem_protect(sb, xmem + offset, bytes, 0);
+		PMFS_END_TIMING(memcpy_w_t, memcpy_time);
 
 		/* if start or end dest address is not 8 byte aligned, 
 	 	 * __copy_from_user_inatomic_nocache uses cacheable instructions
@@ -109,6 +223,7 @@ __pmfs_xip_file_write(struct address_space *mapping, const char __user *buf,
 		pmfs_update_isize(inode, pi);
 	}
 
+	PMFS_END_TIMING(internal_write_t, write_time);
 	return written ? written : status;
 }
 
@@ -121,13 +236,16 @@ static ssize_t pmfs_file_write_fast(struct super_block *sb, struct inode *inode,
 {
 	void *xmem = pmfs_get_block(sb, block);
 	size_t copied, ret = 0, offset;
+	timing_t memcpy_time;
 
 	offset = pos & (sb->s_blocksize - 1);
 
+	PMFS_START_TIMING(memcpy_w_t, memcpy_time);
 	pmfs_xip_mem_protect(sb, xmem + offset, count, 1);
 	copied = count - __copy_from_user_inatomic_nocache(xmem
 		+ offset, buf, count);
 	pmfs_xip_mem_protect(sb, xmem + offset, count, 0);
+	PMFS_END_TIMING(memcpy_w_t, memcpy_time);
 
 	pmfs_flush_edge_cachelines(pos, copied, xmem + offset);
 
@@ -210,6 +328,9 @@ ssize_t pmfs_xip_file_write(struct file *filp, const char __user *buf,
 	size_t count, offset, eblk_offset, ret;
 	unsigned long start_blk, end_blk, num_blocks, max_logentries;
 	bool same_block;
+	timing_t xip_write_time, xip_write_fast_time;
+
+	PMFS_START_TIMING(xip_write_t, xip_write_time);
 
 	sb_start_write(inode->i_sb);
 	mutex_lock(&inode->i_mutex);
@@ -221,12 +342,9 @@ ssize_t pmfs_xip_file_write(struct file *filp, const char __user *buf,
 	pos = *ppos;
 	count = len;
 
-	/* We can write back this queue in page reclaim */
-	current->backing_dev_info = mapping->backing_dev_info;
-
 	ret = generic_write_checks(filp, &pos, &count, S_ISBLK(inode->i_mode));
 	if (ret || count == 0)
-		goto out_backing;
+		goto out;
 
 	pi = pmfs_get_inode(sb, inode->i_ino);
 
@@ -243,9 +361,11 @@ ssize_t pmfs_xip_file_write(struct file *filp, const char __user *buf,
 	same_block = (((count + offset - 1) >>
 			pmfs_inode_blk_shift(pi)) == 0) ? 1 : 0;
 	if (block && same_block) {
+		PMFS_START_TIMING(xip_write_fast_t, xip_write_fast_time);
 		ret = pmfs_file_write_fast(sb, inode, pi, buf, count, pos,
 			ppos, block);
-		goto out_backing;
+		PMFS_END_TIMING(xip_write_fast_t, xip_write_fast_time);
+		goto out;
 	}
 	max_logentries = num_blocks / MAX_PTRS_PER_LENTRY + 2;
 	if (max_logentries > MAX_METABLOCK_LENTRIES)
@@ -254,14 +374,14 @@ ssize_t pmfs_xip_file_write(struct file *filp, const char __user *buf,
 	trans = pmfs_new_transaction(sb, MAX_INODE_LENTRIES + max_logentries);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
-		goto out_backing;
+		goto out;
 	}
 	pmfs_add_logentry(sb, trans, pi, MAX_DATA_PER_LENTRY, LE_DATA);
 
 	ret = file_remove_suid(filp);
 	if (ret) {
 		pmfs_abort_transaction(sb, trans);
-		goto out_backing;
+		goto out;
 	}
 	inode->i_ctime = inode->i_mtime = CURRENT_TIME_SEC;
 	pmfs_update_time(inode, pi);
@@ -293,11 +413,10 @@ ssize_t pmfs_xip_file_write(struct file *filp, const char __user *buf,
 
 	pmfs_commit_transaction(sb, trans);
 	ret = written;
-out_backing:
-	current->backing_dev_info = NULL;
 out:
 	mutex_unlock(&inode->i_mutex);
 	sb_end_write(inode->i_sb);
+	PMFS_END_TIMING(xip_write_t, xip_write_time);
 	return ret;
 }
 
@@ -317,9 +436,9 @@ static int __pmfs_xip_file_fault(struct vm_area_struct *vma,
 	size = (i_size_read(inode) + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 	if (vmf->pgoff >= size) {
 		pmfs_dbg("[%s:%d] pgoff >= size(SIGBUS). vm_start(0x%lx),"
-			" vm_end(0x%lx), pgoff(0x%lx), VA(%lx)\n",
+			" vm_end(0x%lx), pgoff(0x%lx), VA(%lx), size 0x%lx\n",
 			__func__, __LINE__, vma->vm_start, vma->vm_end,
-			vmf->pgoff, (unsigned long)vmf->virtual_address);
+			vmf->pgoff, (unsigned long)vmf->virtual_address, size);
 		return VM_FAULT_SIGBUS;
 	}
 
@@ -660,7 +779,7 @@ int pmfs_xip_file_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	unsigned long block_sz;
 
-	BUG_ON(!file->f_mapping->a_ops->get_xip_mem);
+//	BUG_ON(!file->f_mapping->a_ops->get_xip_mem);
 
 	file_accessed(file);
 
