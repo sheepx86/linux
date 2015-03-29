@@ -20,6 +20,7 @@
 #include <linux/pagemap.h>
 #include <linux/rcupdate.h>
 #include <linux/types.h>
+#include <linux/delay.h>
 
 #include "pmfs_def.h"
 #include "journal.h"
@@ -48,6 +49,7 @@
 #define pmfs_warn(s, args ...)          pr_warning(s, ## args)
 #define pmfs_info(s, args ...)          pr_info(s, ## args)
 
+extern unsigned int pmfs_optclflush;
 extern unsigned int pmfs_dbgmask;
 #define PMFS_DBGMASK_MMAPHUGE          (0x00000001)
 #define PMFS_DBGMASK_MMAP4K            (0x00000002)
@@ -221,6 +223,8 @@ extern struct super_block *pmfs_read_super(struct super_block *sb, void *data,
 extern int pmfs_statfs(struct dentry *d, struct kstatfs *buf);
 extern int pmfs_remount(struct super_block *sb, int *flags, char *data);
 
+extern unsigned int persist_barrier_delay;
+
 /* Provides ordering from all previous clflush too */
 static inline void PERSISTENT_MARK(void)
 {
@@ -229,6 +233,8 @@ static inline void PERSISTENT_MARK(void)
 
 static inline void PERSISTENT_BARRIER(void)
 {
+    if (persist_barrier_delay > 0)
+        udelay(persist_barrier_delay);
 	asm volatile ("sfence\n" : : );
 }
 
@@ -236,13 +242,46 @@ static inline void pmfs_flush_buffer(void *buf, uint32_t len, bool fence)
 {
 	uint32_t i;
 	len = len + ((unsigned long)(buf) & (CACHELINE_SIZE - 1));
+
+    //if (pmfs_optclflush == 0) {
 	for (i = 0; i < len; i += CACHELINE_SIZE)
 		asm volatile ("clflush %0\n" : "+m" (*(char *)(buf+i)));
-	/* Do a fence only if asked. We often don't need to do a fence
+
+#if 0
+    }else{
+     for (i = 0; i < len; i += CACHELINE_SIZE) {
+        /* clflush is really expensive, degrading msync performance in
+         * particular. So, instead we do following to flush a cacheline :
+         * read followed by a non-temporal write (which flushes and invalidates
+         * the cacheline).
+         */
+        asm volatile (  "movq (%0), %%r8\n"
+               "movq 8(%0), %%r9\n"
+               "movq 16(%0), %%r10\n"
+               "movq 24(%0), %%r11\n"
+               "movq 32(%0), %%r12\n"
+               "movq 40(%0), %%r13\n"
+               "movq 48(%0), %%r14\n"
+               "movq 56(%0), %%r15\n"
+               "movnti %%r8, (%0)\n"
+               "movnti %%r9, 8(%0)\n"
+               "movnti %%r10, 16(%0)\n"
+               "movnti %%r11, 24(%0)\n"
+               "movnti %%r12, 32(%0)\n"
+               "movnti %%r13, 40(%0)\n"
+               "movnti %%r14, 48(%0)\n"
+               "movnti %%r15, 56(%0)\n"
+               :
+               :"r"((char *)buf+i)
+               :"%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15", "memory", "cc");
+       }
+    }
+#endif
+    /* Do a fence only if asked. We often don't need to do a fence
 	 * immediately after clflush because even if we get context switched
 	 * between clflush and subsequent fence, the context switch operation
 	 * provides implicit fence. */
-	if (fence)
+    if (fence)
 		asm volatile ("sfence\n" : : );
 }
 

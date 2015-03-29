@@ -46,6 +46,10 @@ static struct kmem_cache *pmfs_blocknode_cachep;
 static struct kmem_cache *pmfs_transaction_cachep;
 /* FIXME: should the following variable be one per PMFS instance? */
 unsigned int pmfs_dbgmask = 0;
+unsigned int persist_barrier_delay = 0;
+unsigned int pmfs_optclflush = 0;
+ 
+
 
 #ifdef CONFIG_PMFS_TEST
 static void *first_pmfs_super;
@@ -164,7 +168,7 @@ enum {
 	Opt_num_inodes, Opt_mode, Opt_uid,
 	Opt_gid, Opt_blocksize, Opt_wprotect, Opt_wprotectold,
 	Opt_err_cont, Opt_err_panic, Opt_err_ro,
-	Opt_hugemmap, Opt_nohugeioremap, Opt_dbgmask, Opt_bs, Opt_err
+    pt_hugemmap, Opt_nohugeioremap, Opt_dbgmask, Opt_barrierdelay, Opt_optclflush, Opt_err
 };
 
 static const match_table_t tokens = {
@@ -185,6 +189,8 @@ static const match_table_t tokens = {
 	{ Opt_nohugeioremap, "nohugeioremap"	  },
 	{ Opt_dbgmask,	     "dbgmask=%u"	  },
 	{ Opt_bs,	     "backing_dev=%s"	  },
+    { Opt_barrierdelay,       "barrierd=%u"   },
+    { Opt_optclflush,       "optclflush=%u"   },
 	{ Opt_err,	     NULL		  },
 };
 
@@ -222,7 +228,7 @@ static int pmfs_parse_options(char *options, struct pmfs_sb_info *sbi,
 
 	if (!options)
 		return 0;
-
+    persist_barrier_delay = 0;
 	while ((p = strsep(&options, ",")) != NULL) {
 		int token;
 		if (!*p)
@@ -336,11 +342,22 @@ static int pmfs_parse_options(char *options, struct pmfs_sb_info *sbi,
 				goto bad_val;
 			pmfs_dbgmask = option;
 			break;
+       case Opt_barrierdelay:
+           if (match_int(&args[0], &option))
+               goto bad_val;
+           persist_barrier_delay = option;
+            printk(KERN_CRIT "rereagraegpteahuaetpre persist_barrier_delay %d\n", persist_barrier_delay);
+           break;
+       case Opt_optclflush:
+           if (match_int(&args[0], &option))
+               goto bad_val;
+           pmfs_optclflush = option;
+           break;
 		default: {
 			goto bad_opt;
 		}
 		}
-	}
+
 
 	return 0;
 
@@ -687,6 +704,7 @@ static int pmfs_fill_super(struct super_block *sb, void *data, int silent)
 	if (pmfs_parse_options(data, sbi, 0))
 		goto out;
 
+    printk(KERN_CRIT "optclflush %d\n", pmfs_optclflush);
 	set_opt(sbi->s_mount_opt, MOUNTING);
 	initsize = sbi->initsize;
 
@@ -954,7 +972,8 @@ static void pmfs_put_super(struct super_block *sb)
 	}
 	sb->s_fs_info = NULL;
 	pmfs_dbgmask = 0;
-	kfree(sbi);
+    pmfs_optclflush = 0;
+    kfree(sbi);
 }
 
 inline void pmfs_free_transaction(pmfs_transaction_t *trans)
