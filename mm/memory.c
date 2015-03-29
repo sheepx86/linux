@@ -3373,6 +3373,94 @@ int __pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long address)
 }
 #endif /* __PAGETABLE_PMD_FOLDED */
 
+/****************************************************************************/
+/* XIP_HUGETLB support */
+pte_t *pte_offset_pagesz(struct mm_struct *mm, unsigned long addr,
+						unsigned long *sz)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd = NULL;
+
+	pgd = pgd_offset(mm, addr);
+	if (!pgd_present(*pgd)) {
+		*sz = PGDIR_SIZE;
+		return (pte_t *)pgd;
+	}
+
+	pud = pud_offset(pgd, addr);
+	if (pud_none(*pud) || pud_large(*pud)) {
+		*sz = PUD_SIZE;
+		return (pte_t *)pud;
+	}
+	pmd = pmd_offset(pud, addr);
+	//if (pmd_none(*pmd) || pmd_large(*pmd)) {
+	*sz = PMD_SIZE;
+	return (pte_t *)pmd;
+}
+EXPORT_SYMBOL(pte_offset_pagesz);
+
+pte_t *pte_alloc_pagesz(struct mm_struct *mm, unsigned long addr, 
+						unsigned long sz)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pte_t *pte = NULL;
+
+	pgd = pgd_offset(mm, addr);
+	pud = pud_alloc(mm, pgd, addr);
+	if (pud) {
+		if (sz == PUD_SIZE) {
+			pte = (pte_t *)pud;
+		} else {
+			BUG_ON(sz != PMD_SIZE);
+			pte = (pte_t *) pmd_alloc(mm, pud, addr);
+		}
+	}
+	BUG_ON(pte && !pte_none(*pte) && !pte_huge(*pte));
+
+	return pte;
+}
+EXPORT_SYMBOL(pte_alloc_pagesz);
+
+static void __unmap_xip_hugetlb_range(struct vm_area_struct *vma,
+				unsigned long start, unsigned long end)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	unsigned long address;
+	pte_t *ptep;
+	pte_t pte;
+	unsigned long sz;
+
+	WARN_ON(!is_xip_hugetlb_mapping(vma));
+
+	mmu_notifier_invalidate_range_start(mm, start, end);
+	spin_lock(&mm->page_table_lock);
+	for (address = start, sz=PMD_SIZE; address < end; address += sz) {
+		ptep = pte_offset_pagesz(mm, address, &sz);
+		if (!ptep)
+			continue;
+
+		pte = ptep_get_and_clear(mm, address, ptep);
+		if (pte_none(pte))
+			continue;
+	}
+	flush_tlb_range(vma, start, end);
+	spin_unlock(&mm->page_table_lock);
+	mmu_notifier_invalidate_range_end(mm, start, end);
+}
+
+void unmap_xip_hugetlb_range(struct vm_area_struct *vma,
+				unsigned long start, unsigned long end)
+{
+	i_mmap_lock_write(vma->vm_file->f_mapping);
+	__unmap_xip_hugetlb_range(vma, start, end);
+	i_mmap_unlock_write(vma->vm_file->f_mapping);
+}
+EXPORT_SYMBOL(unmap_xip_hugetlb_range);
+
+/****************************************************************************/
+
 static int __follow_pte(struct mm_struct *mm, unsigned long address,
 		pte_t **ptepp, spinlock_t **ptlp)
 {

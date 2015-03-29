@@ -1793,6 +1793,7 @@ found:
 	VM_BUG_ON(gap_start + info->length > gap_end);
 	return gap_start;
 }
+EXPORT_SYMBOL(unmapped_area);
 
 unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info)
 {
