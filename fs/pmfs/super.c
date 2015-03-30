@@ -168,7 +168,7 @@ enum {
 	Opt_num_inodes, Opt_mode, Opt_uid,
 	Opt_gid, Opt_blocksize, Opt_wprotect, Opt_wprotectold,
 	Opt_err_cont, Opt_err_panic, Opt_err_ro,
-    pt_hugemmap, Opt_nohugeioremap, Opt_dbgmask, Opt_barrierdelay, Opt_optclflush, Opt_err
+    Opt_hugemmap, Opt_nohugeioremap, Opt_dbgmask, Opt_bs, Opt_barrierdelay, Opt_optclflush, Opt_err
 };
 
 static const match_table_t tokens = {
@@ -346,7 +346,6 @@ static int pmfs_parse_options(char *options, struct pmfs_sb_info *sbi,
            if (match_int(&args[0], &option))
                goto bad_val;
            persist_barrier_delay = option;
-            printk(KERN_CRIT "rereagraegpteahuaetpre persist_barrier_delay %d\n", persist_barrier_delay);
            break;
        case Opt_optclflush:
            if (match_int(&args[0], &option))
@@ -358,6 +357,7 @@ static int pmfs_parse_options(char *options, struct pmfs_sb_info *sbi,
 		}
 		}
 
+    }
 
 	return 0;
 
